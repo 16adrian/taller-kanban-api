@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tablero Kanban · Taller UDLA</title>
+  <style>
+    :root {
+      --bg: #f4f1ea; --ink: #1f2328; --muted: #6b6f76; --line: #d9d4c7;
+      --card: #ffffff; --accent: #b3261e; --ok: #1f7a4d; --warn: #b26a00;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+    header { padding: 20px 28px 12px; border-bottom: 2px solid var(--ink); display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline; justify-content: space-between; }
+    h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+    .sub { color: var(--muted); font-size: .9rem; }
+    .metrics { display: flex; gap: 22px; font-size: .85rem; }
+    .metrics b { display: block; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+    form { display: flex; gap: 8px; padding: 14px 28px; }
+    input { flex: 1; max-width: 420px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+    button { font: inherit; border: 1px solid var(--ink); background: var(--ink); color: #fff; padding: 8px 14px; border-radius: 6px; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--ink); border-color: var(--line); padding: 3px 8px; font-size: .78rem; }
+    button.ghost:hover { border-color: var(--ink); }
+    #toast { margin: 0 28px; min-height: 1.4em; color: var(--accent); font-size: .9rem; }
+    .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 14px; padding: 8px 28px 32px; overflow-x: auto; }
+    .col { background: #ebe6da; border-radius: 10px; padding: 12px; min-height: 300px; }
+    .col h2 { margin: 0 0 4px; font-size: .95rem; display: flex; justify-content: space-between; }
+    .wip { font-size: .75rem; color: var(--muted); }
+    .col.full .wip { color: var(--accent); font-weight: 600; }
+    .policy { font-size: .74rem; color: var(--muted); margin: 0 0 10px; border-left: 3px solid var(--line); padding-left: 6px; }
+    .card { background: var(--card); border-radius: 8px; padding: 10px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+    .card .t { font-size: .9rem; margin-bottom: 6px; }
+    .card .meta { font-size: .72rem; color: var(--muted); margin-bottom: 6px; }
+    .actions { display: flex; gap: 4px; flex-wrap: wrap; }
+    footer { padding: 0 28px 24px; font-size: .78rem; color: var(--muted); }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Tablero Kanban</h1>
+      <div class="sub">Taller de Metodologías de Desarrollo de Software · UDLA · desplegado con CI/CD</div>
+    </div>
+    <div class="metrics" id="metrics"></div>
+  </header>
+
+  <form id="new">
+    <input id="title" placeholder="Nueva tarjeta…" maxlength="120" required>
+    <button type="submit">Agregar</button>
+  </form>
+  <div id="toast" role="status"></div>
+
+  <main class="board" id="board"></main>
+
+  <footer>
+    API: <a href="/api">/api</a> · <a href="/api/board">/api/board</a> · <a href="/api/metrics">/api/metrics</a> · <a href="/health">/health</a>
+    <span id="ver"></span>
+  </footer>
+
+  <script>
+    const order = ['todo', 'doing', 'review', 'done'];
+    const toast = document.getElementById('toast');
+
+    async function api(method, url, body) {
+      const res = await fetch(url, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+      if (!res.ok) { throw new Error(data && data.message ? data.message : res.statusText); }
+      return data;
+    }
+
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) { n.className = cls; }
+      if (text !== undefined) { n.textContent = text; }
+      return n;
+    }
+
+    async function move(id, to) {
+      try { await api('PATCH', '/api/cards/' + id + '/move', { to }); toast.textContent = ''; }
+      catch (e) { toast.textContent = '⛔ ' + e.message; }
+      render();
+    }
+
+    async function remove(id) {
+      await api('DELETE', '/api/cards/' + id);
+      render();
+    }
+
+    async function render() {
+      const [board, m] = await Promise.all([api('GET', '/api/board'), api('GET', '/api/metrics')]);
+      const root = document.getElementById('board');
+      root.replaceChildren();
+      board.forEach((col) => {
+        const c = el('section', 'col' + (col.full ? ' full' : ''));
+        const h = el('h2', null, col.name);
+        h.appendChild(el('span', 'wip', col.count + (col.wipLimit ? ' / ' + col.wipLimit + ' WIP' : '')));
+        c.appendChild(h);
+        c.appendChild(el('p', 'policy', col.policy));
+        col.cards.forEach((card) => {
+          const k = el('article', 'card');
+          k.appendChild(el('div', 't', '#' + card.id + ' ' + card.title));
+          k.appendChild(el('div', 'meta', (card.assignee ? card.assignee + ' · ' : '') + new Date(card.createdAt).toLocaleString()));
+          const a = el('div', 'actions');
+          const i = order.indexOf(col.id);
+          if (i > 0) { const b = el('button', 'ghost', '← ' + board[i - 1].name); b.onclick = () => move(card.id, order[i - 1]); a.appendChild(b); }
+          if (i < order.length - 1) { const b = el('button', 'ghost', board[i + 1].name + ' →'); b.onclick = () => move(card.id, order[i + 1]); a.appendChild(b); }
+          const d = el('button', 'ghost', '✕'); d.title = 'Eliminar'; d.onclick = () => remove(card.id); a.appendChild(d);
+          k.appendChild(a);
+          c.appendChild(k);
+        });
+        root.appendChild(c);
+      });
+      const fmt = (v) => (v === null ? '—' : v + ' h');
+      document.getElementById('metrics').innerHTML =
+        '<div><b>' + m.throughput + '</b>Throughput</div>' +
+        '<div><b>' + fmt(m.averageLeadTimeHours) + '</b>Lead time prom.</div>' +
+        '<div><b>' + fmt(m.averageCycleTimeHours) + '</b>Cycle time prom.</div>' +
+        '<div><b>' + m.totalCards + '</b>Tarjetas</div>';
+    }
+
+    document.getElementById('new').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const input = document.getElementById('title');
+      try { await api('POST', '/api/cards', { title: input.value }); input.value = ''; toast.textContent = ''; }
+      catch (e) { toast.textContent = '⛔ ' + e.message; }
+      render();
+    });
+
+    api('GET', '/health').then((h) => {
+      document.getElementById('ver').textContent = ' · v' + h.version + ' · commit ' + String(h.commit).slice(0, 7);
+    });
+    render();
+  </script>
+</body>
+</html>

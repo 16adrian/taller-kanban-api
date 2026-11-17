@@ -1,0 +1,170 @@
+# Pipeline CI/CD de la API Kanban
+#
+#   1. Lint ─► 2. Pruebas ─► 3. Seguridad ─► 4. Build (Docker) ─► 5. Deploy (Render) ─► 6. Verificación en producción
+#
+# Las etapas 1-4 son Integración Continua (CI): se ejecutan en cada push y pull request.
+# Las etapas 5-6 son Despliegue Continuo (CD): solo corren en push a "main" y solo si todo lo anterior pasó.
+# Si cualquier etapa falla, las siguientes no se ejecutan y el código roto NUNCA llega a producción.
+
+name: CI-CD Kanban API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Evita dos despliegues simultáneos sobre el mismo entorno.
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  lint:
+    name: 1. Lint (calidad de código)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Instalar dependencias
+        run: npm install --no-audit --no-fund
+      - name: Ejecutar ESLint
+        run: npm run lint
+
+  test:
+    name: 2. Pruebas unitarias e integración
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Instalar dependencias
+        run: npm install --no-audit --no-fund
+      - name: Ejecutar pruebas con cobertura
+        run: |
+          node --test --experimental-test-coverage \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=test-results.xml \
+            "test/**/*.test.js"
+      - name: Publicar resultados de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-pruebas
+          path: test-results.xml
+
+  security:
+    name: 3. Auditoría de seguridad
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Instalar dependencias
+        run: npm install --no-audit --no-fund
+      - name: npm audit (falla con vulnerabilidades altas o críticas)
+        run: npm audit --omit=dev --audit-level=high
+
+  build:
+    name: 4. Build y prueba del contenedor
+    needs: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen Docker
+        run: docker build -t kanban-api:${{ github.sha }} .
+      - name: Levantar el contenedor
+        run: |
+          docker run -d --name kanban -p 3000:3000 -e GIT_COMMIT=${{ github.sha }} kanban-api:${{ github.sha }}
+          for i in $(seq 1 15); do
+            curl -fs http://localhost:3000/health && break
+            sleep 2
+          done
+      - name: Smoke test del contenedor
+        run: |
+          curl -fsS http://localhost:3000/health | tee health.json
+          grep -q '"status":"ok"' health.json
+          curl -fsS http://localhost:3000/api/board > /dev/null
+          echo "El contenedor responde correctamente"
+      - name: Detener contenedor
+        if: always()
+        run: docker rm -f kanban || true
+
+  deploy:
+    name: 5. Deploy a Render (producción)
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    steps:
+      - name: Validar configuración
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::Falta el secreto RENDER_DEPLOY_HOOK_URL (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+          if [ -z "$APP_URL" ]; then
+            echo "::error::Falta la variable APP_URL (Settings > Secrets and variables > Actions > Variables)"
+            exit 1
+          fi
+      - name: Disparar despliegue del commit ${{ github.sha }}
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          curl -fsS -X POST "${HOOK}&ref=${GITHUB_SHA}"
+          echo ""
+          echo "Despliegue solicitado a Render para el commit ${GITHUB_SHA}"
+
+  verify:
+    name: 6. Verificación en producción
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Esperar a que producción sirva el nuevo commit
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          # Render (plan gratuito) tarda unos minutos en construir y arrancar.
+          for i in $(seq 1 45); do
+            COMMIT=$(curl -fs "$APP_URL/health" | sed -n 's/.*"commit":"\([^"]*\)".*/\1/p' || true)
+            echo "Intento $i: producción reporta commit '${COMMIT:-sin respuesta}'"
+            if [ "$COMMIT" = "$GITHUB_SHA" ]; then
+              echo "Producción ya ejecuta el commit $GITHUB_SHA"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Producción no reportó el commit esperado en 15 minutos"
+          exit 1
+      - name: Smoke test contra producción
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          curl -fsS "$APP_URL/api/board" > /dev/null
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$APP_URL/api/cards" \
+            -H "Content-Type: application/json" -d '{"title":"Smoke test del pipeline ${{ github.run_number }}"}')
+          test "$CODE" = "201"
+          {
+            echo "### Despliegue verificado"
+            echo ""
+            echo "- URL: $APP_URL"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Ejecución: #${{ github.run_number }}"
+          } >> "$GITHUB_STEP_SUMMARY"

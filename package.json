@@ -1,0 +1,24 @@
+{
+  "name": "taller-kanban-api",
+  "version": "1.0.0",
+  "description": "API de tablero Kanban con límites WIP y métricas de flujo, desplegada con CI/CD (Metodologías de Desarrollo de Software - UDLA)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "lint": "eslint .",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:coverage": "node --test --experimental-test-coverage \"test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "Adrián Morales Quilumba",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "eslint": "^10.1.0"
+  }
+}
