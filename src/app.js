@@ -5,6 +5,8 @@ const express = require('express');
 const { KanbanBoard, KanbanError } = require('./board');
 const pkg = require('../package.json');
 
+const debugMode = true;
+
 function createApp(board = new KanbanBoard()) {
   const app = express();
   app.use(express.json());
