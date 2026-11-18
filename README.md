@@ -4,7 +4,7 @@ API REST de un **tablero Kanban** con **límites WIP** y **métricas de flujo** 
 
 > Metodologías de Desarrollo de Software · UDLA · NRC 2206 · Adrián Morales Quilumba
 
-**Producción:** `https://<tu-servicio>.onrender.com` (reemplazar por la URL real)
+**Producción:** https://taller-kanban-api.onrender.com/
 
 ## Endpoints
 
